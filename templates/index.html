@@ -3,26 +3,49 @@
 <head><title>Link Accounts & Setup Forwarding</title></head>
 <body>
   <h1>Link your accounts</h1>
-  <a href="/auth/twitch">Login with Twitch</a><br>
-  <a href="/auth/youtube">Login with YouTube</a>
+
+  <p>
+    {% if twitch_user %}
+      Twitch account linked: <b>{{ twitch_user }}</b>
+    {% else %}
+      <a href="/auth/twitch">Login with Twitch</a>
+    {% endif %}
+  </p>
+
+  <p>
+    {% if yt_channel %}
+      YouTube channel linked: <b>{{ yt_channel }}</b>
+    {% else %}
+      <a href="/auth/youtube">Login with YouTube</a>
+    {% endif %}
+  </p>
 
   <hr>
 
   <h2>Configure message forwarding</h2>
-  <form method="POST" action="/set_forward">
-    <label>Twitch Username (lowercase):</label><br>
-    <input name="twitch_username" required><br><br>
 
+  <form method="POST" action="/set_forward">
     <label>Command trigger (e.g. !bsr):</label><br>
-    <input name="command" required><br><br>
+    <input name="command" required value="{{ forward_command }}"><br><br>
 
     <label>Forward direction:</label><br>
     <select name="direction" required>
-      <option value="twitch_to_yt">Twitch → YouTube</option>
-      <option value="yt_to_twitch">YouTube → Twitch</option>
+      <option value="twitch_to_yt" {% if forward_direction == 'twitch_to_yt' %}selected{% endif %}>Twitch → YouTube</option>
+      <option value="yt_to_twitch" {% if forward_direction == 'yt_to_twitch' %}selected{% endif %}>YouTube → Twitch</option>
     </select><br><br>
 
     <button type="submit">Save</button>
   </form>
+
+  {% with messages = get_flashed_messages() %}
+    {% if messages %}
+      <hr>
+      <ul>
+      {% for msg in messages %}
+        <li>{{ msg }}</li>
+      {% endfor %}
+      </ul>
+    {% endif %}
+  {% endwith %}
 </body>
 </html>
