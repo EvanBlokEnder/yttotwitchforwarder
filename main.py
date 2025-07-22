@@ -1,12 +1,12 @@
 import os
-import sqlite3
+import time
 import uuid
 import threading
 import asyncio
+import sqlite3
 import requests
-from flask import Flask, redirect, request, render_template, url_for
+from flask import Flask, redirect, request, render_template, session, url_for
 from twitchio.ext import commands
-
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
@@ -19,41 +19,47 @@ YT_CLIENT_SECRET = os.getenv("YT_CLIENT_SECRET")
 REDIRECT_URI = os.getenv("REDIRECT_URI")
 
 app = Flask(__name__)
+app.secret_key = os.getenv("FLASK_SECRET_KEY", "supersecretkey")
 
-# === DATABASE SETUP ===
+# === DATABASE ===
 conn = sqlite3.connect("users.db", check_same_thread=False)
 cur = conn.cursor()
 cur.execute("""
 CREATE TABLE IF NOT EXISTS users (
-  id TEXT PRIMARY KEY,
-  yt_access_token TEXT,
-  yt_refresh_token TEXT,
-  yt_token_expiry INTEGER,
-  twitch_access_token TEXT,
-  twitch_refresh_token TEXT,
-  twitch_token_expiry INTEGER,
-  yt_channel_id TEXT,
-  twitch_username TEXT,
-  forward_command TEXT,
-  forward_direction TEXT
+    id TEXT PRIMARY KEY,
+    yt_access_token TEXT,
+    yt_refresh_token TEXT,
+    yt_token_expiry INTEGER,
+    yt_channel_id TEXT,
+    twitch_access_token TEXT,
+    twitch_refresh_token TEXT,
+    twitch_token_expiry INTEGER,
+    twitch_username TEXT,
+    forward_command TEXT,
+    forward_direction TEXT
 )
 """)
 conn.commit()
 
-# === UTILITIES ===
+# === TOKEN UTILITIES ===
+
+def get_current_time():
+    return int(time.time())
 
 def save_youtube_tokens(user_id, access_token, refresh_token, expires_in, channel_id):
-    expiry = int(expires_in) + int(os.time.time())
+    expiry = get_current_time() + expires_in
     cur.execute("""
-    INSERT OR REPLACE INTO users (id, yt_access_token, yt_refresh_token, yt_token_expiry, yt_channel_id)
+    INSERT OR REPLACE INTO users
+    (id, yt_access_token, yt_refresh_token, yt_token_expiry, yt_channel_id)
     VALUES (?, ?, ?, ?, ?)
     """, (user_id, access_token, refresh_token, expiry, channel_id))
     conn.commit()
 
 def save_twitch_tokens(user_id, access_token, refresh_token, expires_in, username):
-    expiry = int(expires_in) + int(os.time.time())
+    expiry = get_current_time() + expires_in
     cur.execute("""
-    INSERT OR REPLACE INTO users (id, twitch_access_token, twitch_refresh_token, twitch_token_expiry, twitch_username)
+    INSERT OR REPLACE INTO users
+    (id, twitch_access_token, twitch_refresh_token, twitch_token_expiry, twitch_username)
     VALUES (?, ?, ?, ?, ?)
     """, (user_id, access_token, refresh_token, expiry, username))
     conn.commit()
@@ -68,20 +74,126 @@ def get_user_by_twitch_username(username):
     cur.execute("SELECT * FROM users WHERE twitch_username = ?", (username,))
     return cur.fetchone()
 
-def get_user_by_youtube_channel(channel_id):
-    cur.execute("SELECT * FROM users WHERE yt_channel_id = ?", (channel_id,))
+def get_user_by_id(user_id):
+    cur.execute("SELECT * FROM users WHERE id = ?", (user_id,))
     return cur.fetchone()
 
-# === OAUTH ROUTES ===
+# === TOKEN REFRESH LOGIC ===
+
+def refresh_youtube_token(user):
+    refresh_token = user[2]
+    if not refresh_token:
+        return None
+    data = {
+        "client_id": YT_CLIENT_ID,
+        "client_secret": YT_CLIENT_SECRET,
+        "refresh_token": refresh_token,
+        "grant_type": "refresh_token",
+    }
+    res = requests.post("https://oauth2.googleapis.com/token", data=data)
+    if res.status_code != 200:
+        print("Failed to refresh YouTube token:", res.text)
+        return None
+    tokens = res.json()
+    access_token = tokens["access_token"]
+    expires_in = tokens.get("expires_in", 3600)
+    # Update DB
+    expiry = get_current_time() + expires_in
+    cur.execute("""
+    UPDATE users SET yt_access_token = ?, yt_token_expiry = ? WHERE id = ?
+    """, (access_token, expiry, user[0]))
+    conn.commit()
+    return access_token
+
+def refresh_twitch_token(user):
+    refresh_token = user[6]
+    if not refresh_token:
+        return None
+    params = {
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "client_id": TWITCH_CLIENT_ID,
+        "client_secret": TWITCH_CLIENT_SECRET,
+    }
+    res = requests.post("https://id.twitch.tv/oauth2/token", params=params)
+    if res.status_code != 200:
+        print("Failed to refresh Twitch token:", res.text)
+        return None
+    tokens = res.json()
+    access_token = tokens["access_token"]
+    refresh_token = tokens.get("refresh_token", refresh_token)
+    expires_in = tokens.get("expires_in", 3600)
+    expiry = get_current_time() + expires_in
+    # Update DB
+    cur.execute("""
+    UPDATE users SET twitch_access_token = ?, twitch_refresh_token = ?, twitch_token_expiry = ? WHERE id = ?
+    """, (access_token, refresh_token, expiry, user[0]))
+    conn.commit()
+    return access_token
+
+# === API HELPERS ===
+
+def get_valid_youtube_token(user):
+    if user[3] is None or user[3] < get_current_time():
+        # Token expired, refresh
+        new_token = refresh_youtube_token(user)
+        return new_token
+    return user[1]
+
+def get_valid_twitch_token(user):
+    if user[7] is None or user[7] < get_current_time():
+        # Token expired, refresh
+        new_token = refresh_twitch_token(user)
+        return new_token
+    return user[5]
+
+def send_message_to_youtube_livechat(channel_id, access_token, message):
+    try:
+        # Get live broadcast ID for the channel
+        creds = Credentials(token=access_token)
+        youtube = build("youtube", "v3", credentials=creds)
+        live_broadcasts = youtube.liveBroadcasts().list(
+            part="snippet",
+            broadcastStatus="active",
+            broadcastType="all",
+            mine=True
+        ).execute()
+        if not live_broadcasts["items"]:
+            print("No active live broadcast for YouTube channel")
+            return False
+        live_chat_id = live_broadcasts["items"][0]["snippet"]["liveChatId"]
+
+        # Send chat message
+        youtube.liveChatMessages().insert(
+            part="snippet",
+            body={
+                "snippet": {
+                    "liveChatId": live_chat_id,
+                    "type": "textMessageEvent",
+                    "textMessageDetails": {
+                        "messageText": message
+                    }
+                }
+            }
+        ).execute()
+        print("Sent message to YouTube live chat:", message)
+        return True
+    except Exception as e:
+        print("Error sending message to YouTube live chat:", e)
+        return False
+
+# === FLASK WEB APP ===
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    user_id = session.get("user_id")
+    user = get_user_by_id(user_id) if user_id else None
+    return render_template("index.html", user=user)
 
 @app.route("/auth/youtube")
 def auth_youtube():
     state = str(uuid.uuid4())
-    # Save state in session or DB for CSRF protection, skipped here for brevity
+    session["oauth_state"] = state
     scope = "https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/youtube.force-ssl"
     return redirect(
         "https://accounts.google.com/o/oauth2/v2/auth?" +
@@ -91,6 +203,7 @@ def auth_youtube():
 @app.route("/auth/twitch")
 def auth_twitch():
     state = str(uuid.uuid4())
+    session["oauth_state"] = state
     scope = "chat:read chat:edit"
     return redirect(
         "https://id.twitch.tv/oauth2/authorize?" +
@@ -105,10 +218,12 @@ def callback():
     if error:
         return f"Error: {error}"
 
-    # Detect source by checking if Google or Twitch url - hacky but effective
-    ref = request.referrer or ""
-    if "accounts.google.com" in ref:
-        # Exchange code for tokens for YouTube
+    if state != session.get("oauth_state"):
+        return "Invalid state parameter", 400
+
+    # Determine provider by checking query params (Google sends 'scope')
+    if "scope" in request.args:
+        # YouTube token exchange
         token_res = requests.post("https://oauth2.googleapis.com/token", data={
             "client_id": YT_CLIENT_ID,
             "client_secret": YT_CLIENT_SECRET,
@@ -121,20 +236,15 @@ def callback():
         refresh_token = token_json.get("refresh_token")
         expires_in = token_json.get("expires_in")
 
-        # Get channel ID
         creds = Credentials(token=access_token)
         youtube = build('youtube', 'v3', credentials=creds)
         channels = youtube.channels().list(mine=True, part="id").execute()
         channel_id = channels['items'][0]['id']
 
-        # Save tokens and channel ID keyed by state (you can use sessions in prod)
-        cur.execute("""
-        INSERT OR REPLACE INTO users (id, yt_access_token, yt_refresh_token, yt_token_expiry, yt_channel_id)
-        VALUES (?, ?, ?, ?, ?)
-        """, (state, access_token, refresh_token, expires_in, channel_id))
-        conn.commit()
-
-        return "YouTube account linked successfully. You can close this tab."
+        user_id = session.get("user_id") or str(uuid.uuid4())
+        session["user_id"] = user_id
+        save_youtube_tokens(user_id, access_token, refresh_token, expires_in, channel_id)
+        return "YouTube account linked! You can close this tab."
     else:
         # Twitch token exchange
         token_res = requests.post("https://id.twitch.tv/oauth2/token", params={
@@ -149,7 +259,6 @@ def callback():
         refresh_token = token_json.get("refresh_token")
         expires_in = token_json.get("expires_in")
 
-        # Get username with token
         user_res = requests.get("https://api.twitch.tv/helix/users", headers={
             "Authorization": f"Bearer {access_token}",
             "Client-Id": TWITCH_CLIENT_ID
@@ -157,24 +266,22 @@ def callback():
         user_json = user_res.json()
         username = user_json['data'][0]['login']
 
-        # Save tokens and username keyed by state
-        cur.execute("""
-        INSERT OR REPLACE INTO users (id, twitch_access_token, twitch_refresh_token, twitch_token_expiry, twitch_username)
-        VALUES (?, ?, ?, ?, ?)
-        """, (state, access_token, refresh_token, expires_in, username))
-        conn.commit()
-
-        return "Twitch account linked successfully. You can close this tab."
+        user_id = session.get("user_id") or str(uuid.uuid4())
+        session["user_id"] = user_id
+        save_twitch_tokens(user_id, access_token, refresh_token, expires_in, username)
+        return "Twitch account linked! You can close this tab."
 
 @app.route("/set_forward", methods=["POST"])
 def set_forward():
-    user_id = request.form.get("user_id")
+    user_id = session.get("user_id")
+    if not user_id:
+        return "No user session found. Link your accounts first.", 400
     command = request.form.get("command")
     direction = request.form.get("direction")
-    if not all([user_id, command, direction]):
-        return "Missing parameters", 400
+    if not command or not direction:
+        return "Missing command or direction", 400
     update_forwarding(user_id, command, direction)
-    return "Forwarding command saved."
+    return "Forwarding command saved!"
 
 # === TWITCH BOT ===
 
@@ -188,9 +295,9 @@ class TwitchBot(commands.Bot):
     async def event_message(self, message):
         await self.handle_commands(message)
         if message.echo:
-            return  # Ignore bot's own messages
+            return  # Ignore own messages
 
-        user = message.author.name
+        user = message.author.name.lower()
         user_data = get_user_by_twitch_username(user)
         if not user_data:
             return
@@ -199,24 +306,23 @@ class TwitchBot(commands.Bot):
         if not command or not message.content.startswith(command):
             return
 
-        # Extract the message after the command
         payload = message.content[len(command):].strip()
         if direction == "twitch_to_yt":
-            # Forward message to YouTube live chat
-            yt_channel_id = user_data[7]
-            yt_access_token = user_data[1]
-            if yt_access_token:
-                # Refresh token and send chat message (left as an exercise)
-                # Minimal example:
-                print(f"Forwarding from Twitch to YouTube: {payload}")
+            yt_access_token = get_valid_youtube_token(user_data)
+            yt_channel_id = user_data[4]
+            if yt_access_token and yt_channel_id:
+                success = send_message_to_youtube_livechat(yt_channel_id, yt_access_token, payload)
+                if success:
+                    await message.channel.send(f"Forwarded to YouTube: {payload}")
+                else:
+                    await message.channel.send("Failed to forward message to YouTube.")
+            else:
+                await message.channel.send("YouTube account not linked or token expired.")
         elif direction == "yt_to_twitch":
-            # This bot only listens on Twitch chat, so ignore here
+            # YouTube -> Twitch forwarding requires YouTube chat listener (not implemented here)
             pass
 
-        # Send a confirmation message in Twitch chat
-        await message.channel.send(f"! [BOT] ! {payload}")
-
-# === RUN SERVER & BOT ===
+# === RUN APP & BOT ===
 
 def run_flask():
     app.run(host="0.0.0.0", port=10000)
@@ -226,6 +332,5 @@ def run_bot():
     asyncio.run(bot.run())
 
 if __name__ == "__main__":
-    flask_thread = threading.Thread(target=run_flask)
-    flask_thread.start()
+    threading.Thread(target=run_flask).start()
     run_bot()
