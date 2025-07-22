@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Link & Configure</title>
+  <title>Link Accounts & Setup Forwarding</title>
 </head>
 <body>
   <h1>Link Your Accounts</h1>
@@ -9,8 +9,12 @@
   <a href="/auth/twitch">Login with Twitch</a>
 
   <hr>
-  <h2>Set Forwarding</h2>
+
+  <h2>Set Forwarding Rule</h2>
   <form method="POST" action="/set_forward">
+    <label>User ID (state from OAuth flow):</label>
+    <input name="user_id" required>
+    <br>
     <label>Command (e.g. !bsr):</label>
     <input name="command" required>
     <br>
