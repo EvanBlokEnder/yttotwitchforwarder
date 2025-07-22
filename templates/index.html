@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Link & Configure</title>
+</head>
+<body>
+  <h1>Link Your Accounts</h1>
+  <a href="/auth/youtube">Login with YouTube</a><br>
+  <a href="/auth/twitch">Login with Twitch</a>
+
+  <hr>
+  <h2>Set Forwarding</h2>
+  <form method="POST" action="/set_forward">
+    <label>Command (e.g. !bsr):</label>
+    <input name="command" required>
+    <br>
+    <label>Direction:</label>
+    <select name="direction">
+      <option value="yt_to_twitch">YouTube → Twitch</option>
+      <option value="twitch_to_yt">Twitch → YouTube</option>
+    </select>
+    <br>
+    <button type="submit">Save Forward</button>
+  </form>
+</body>
+</html>

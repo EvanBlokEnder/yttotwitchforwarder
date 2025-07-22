@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: yt-twitch-bot
+    env: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python main.py"
+    envVars:
+      - key: TWITCH_CLIENT_ID
+        value: your-twitch-client-id
+      - key: TWITCH_CLIENT_SECRET
+        value: your-twitch-client-secret
+      - key: TWITCH_BOT_TOKEN
+        value: oauth:your-twitch-bot-token
+      - key: YT_CLIENT_ID
+        value: your-google-client-id
+      - key: YT_CLIENT_SECRET
+        value: your-google-client-secret
+      - key: REDIRECT_URI
+        value: https://your-service.onrender.com/callback
