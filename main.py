@@ -13,7 +13,6 @@ from twitchio.ext import commands
 TWITCH_CLIENT_ID = os.getenv("TWITCH_CLIENT_ID")
 TWITCH_CLIENT_SECRET = os.getenv("TWITCH_CLIENT_SECRET")
 TWITCH_BOT_TOKEN = os.getenv("TWITCH_BOT_TOKEN")
-TWITCH_BOT_ID = os.getenv("TWITCH_BOT_ID")  # numeric user ID string
 YT_CLIENT_ID = os.getenv("YT_CLIENT_ID")
 YT_CLIENT_SECRET = os.getenv("YT_CLIENT_SECRET")
 REDIRECT_URI = os.getenv("REDIRECT_URI", "http://localhost:10000/callback")
@@ -266,9 +265,12 @@ class YouTubeLiveChatPoller:
 
     async def start(self):
         async with ClientSession() as session:
-            while self.running:
-                await self.poll_all_users(session)
-                await asyncio.sleep(5)  # poll every 5 seconds
+            try:
+                while self.running:
+                    await self.poll_all_users(session)
+                    await asyncio.sleep(5)  # poll every 5 seconds
+            finally:
+                await session.close()
 
     async def poll_all_users(self, session):
         for user_id, user in list(users.items()):
@@ -325,7 +327,7 @@ class YouTubeLiveChatPoller:
                 if chat_resp.status != 200:
                     print(f"YT Live chat messages failed for user {user_id}: {await chat_resp.text()}")
                     return
-                chat_data = await resp.json()
+                chat_data = await chat_resp.json()
 
             messages = chat_data.get("items", [])
             print(f"Found {len(messages)} messages for user {user_id}")
@@ -361,13 +363,14 @@ class TwitchBot(commands.Bot):
     def __init__(self):
         if not TWITCH_BOT_TOKEN:
             raise ValueError("TWITCH_BOT_TOKEN is not set")
+        if not TWITCH_BOT_TOKEN.startswith("oauth:"):
+            raise ValueError("TWITCH_BOT_TOKEN must start with 'oauth:'")
         super().__init__(
             token=TWITCH_BOT_TOKEN,
             prefix="!",
             initial_channels=[],
             client_id=TWITCH_CLIENT_ID,
             client_secret=TWITCH_CLIENT_SECRET,
-            bot_id=TWITCH_BOT_ID,
         )
         self.youtube_poller = YouTubeLiveChatPoller(self)
 
@@ -428,8 +431,8 @@ class TwitchBot(commands.Bot):
                             return
                         matched_user = get_user(matched_user_id)
 
-                    try:
-                        async with ClientSession() as session:
+                    async with ClientSession() as session:
+                        try:
                             headers = {"Authorization": f"Bearer {matched_user['yt_token']}"}
                             url = f"https://www.googleapis.com/youtube/v3/search?part=snippet&channelId={matched_user['yt_channel']}&eventType=live&type=video"
                             async with session.get(url, headers=headers) as resp:
@@ -480,9 +483,11 @@ class TwitchBot(commands.Bot):
                                 print(f"Forwarded Twitch->YT for user {matched_user_id}: {sent_message}")
                                 await message.channel.send(f"!@{user} response from YouTube {sent_message}")
 
-                    except Exception as e:
-                        print(f"Error forwarding Twitch->YT for user {matched_user_id}: {e}")
-                        await message.channel.send(f"!@{user} Failed to forward to YouTube: Internal error")
+                        except Exception as e:
+                            print(f"Error forwarding Twitch->YT for user {matched_user_id}: {e}")
+                            await message.channel.send(f"!@{user} Failed to forward to YouTube: Internal error")
+                        finally:
+                            await session.close()
                 else:
                     print(f"Twitch message from {user} not forwarded: Direction is {direction}")
 
@@ -497,7 +502,6 @@ def run_bot():
         "TWITCH_CLIENT_ID": TWITCH_CLIENT_ID,
         "TWITCH_CLIENT_SECRET": TWITCH_CLIENT_SECRET,
         "TWITCH_BOT_TOKEN": TWITCH_BOT_TOKEN,
-        "TWITCH_BOT_ID": TWITCH_BOT_ID,
         "YT_CLIENT_ID": YT_CLIENT_ID,
         "YT_CLIENT_SECRET": YT_CLIENT_SECRET
     }
@@ -507,15 +511,19 @@ def run_bot():
     if missing_vars:
         print(f"Missing required environment variables: {', '.join(missing_vars)}")
         return
-    bot = TwitchBot()
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    if not TWITCH_BOT_TOKEN.startswith("oauth:"):
+        print("Invalid TWITCH_BOT_TOKEN: Must start with 'oauth:'")
+        return
     try:
-        loop.run_until_complete(bot.start())
+        bot = TwitchBot()
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(bot.start())
+        finally:
+            loop.close()
     except Exception as e:
         print(f"Bot failed to start: {e}")
-    finally:
-        loop.close()
 
 if __name__ == "__main__":
     threading.Thread(target=run_flask, daemon=True).start()
