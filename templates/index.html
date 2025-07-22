@@ -1,32 +1,28 @@
 <!DOCTYPE html>
 <html>
-<head><title>Link & Configure Forwarding</title></head>
+<head><title>Link Accounts & Setup Forwarding</title></head>
 <body>
-  <h1>Link Your Accounts</h1>
-  <p><a href="/auth/youtube">Login with YouTube</a></p>
-  <p><a href="/auth/twitch">Login with Twitch</a></p>
+  <h1>Link your accounts</h1>
+  <a href="/auth/twitch">Login with Twitch</a><br>
+  <a href="/auth/youtube">Login with YouTube</a>
 
-  <h2>Set Forwarding Rule</h2>
+  <hr>
+
+  <h2>Configure message forwarding</h2>
   <form method="POST" action="/set_forward">
-    <label>User ID (from OAuth callback state):</label><br/>
-    <input name="user_id" required /><br/>
-    <label>Command (e.g. !bsr):</label><br/>
-    <input name="command" required /><br/>
-    <label>Direction:</label><br/>
+    <label>Twitch Username (lowercase):</label><br>
+    <input name="twitch_username" required><br><br>
+
+    <label>Command trigger (e.g. !bsr):</label><br>
+    <input name="command" required><br><br>
+
+    <label>Forward direction:</label><br>
     <select name="direction" required>
-      <option value="yt_to_twitch">YouTube → Twitch</option>
       <option value="twitch_to_yt">Twitch → YouTube</option>
-    </select><br/><br/>
+      <option value="yt_to_twitch">YouTube → Twitch</option>
+    </select><br><br>
+
     <button type="submit">Save</button>
   </form>
-
-  <h2>Debug Linked Users</h2>
-  <pre id="userlist"></pre>
-
-  <script>
-    fetch("/users").then(r => r.json()).then(data => {
-      document.getElementById("userlist").textContent = JSON.stringify(data, null, 2)
-    });
-  </script>
 </body>
 </html>
