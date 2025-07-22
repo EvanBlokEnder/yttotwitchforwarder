@@ -1,11 +1,10 @@
 import os
 import json
 import uuid
+import time
 import asyncio
 import threading
-import time
-import requests
-
+from aiohttp import ClientSession
 from flask import Flask, request, redirect, render_template, make_response
 from twitchio.ext import commands
 
@@ -111,11 +110,16 @@ def callback():
 
     if "scope" in request.args:  # Twitch callback
         token_url = (
-            "https://id.twitch.tv/oauth2/token?"
-            f"client_id={TWITCH_CLIENT_ID}&client_secret={TWITCH_CLIENT_SECRET}&code={code}&"
-            f"grant_type=authorization_code&redirect_uri={REDIRECT_URI}"
+            "https://id.twitch.tv/oauth2/token"
         )
-        resp = requests.post(token_url)
+        payload = {
+            "client_id": TWITCH_CLIENT_ID,
+            "client_secret": TWITCH_CLIENT_SECRET,
+            "code": code,
+            "grant_type": "authorization_code",
+            "redirect_uri": REDIRECT_URI,
+        }
+        resp = requests.post(token_url, data=payload)
         if resp.status_code != 200:
             return f"Failed to get Twitch token: {resp.text}", 500
         data = resp.json()
@@ -244,65 +248,63 @@ class YouTubeLiveChatPoller:
         self.bot = bot
         self.running = True
         self.last_message_ids = {}  # user_id -> set(message_ids)
-        self.loop = asyncio.get_event_loop()
 
     async def start(self):
-        while self.running:
-            await self.poll_all_users()
-            await asyncio.sleep(5)  # poll every 5 seconds
+        async with ClientSession() as session:
+            while self.running:
+                await self.poll_all_users(session)
+                await asyncio.sleep(5)  # poll every 5 seconds
 
-    async def poll_all_users(self):
-        for user_id, user in users.items():
+    async def poll_all_users(self, session):
+        for user_id, user in list(users.items()):
             if "yt_token" not in user or "yt_channel" not in user or "forward_direction" not in user:
                 continue
             if user["forward_direction"] != "yt_to_twitch":
                 continue
 
-            # Check if token expired (with 60s margin)
             expiry = user.get("yt_token_expiry", 0)
             if time.time() > expiry - 60:
                 print(f"Refreshing YouTube token for user {user_id}")
                 refresh_youtube_token(user_id)
-                user = get_user(user_id)  # refresh user data after update
+                user = get_user(user_id)
 
-            await self.poll_live_chat(user_id, user)
+            await self.poll_live_chat(user_id, user, session)
 
-    async def poll_live_chat(self, user_id, user):
+    async def poll_live_chat(self, user_id, user, session):
         try:
-            # Get liveBroadcastId for the channel (YouTube API)
             headers = {"Authorization": f"Bearer {user['yt_token']}"}
+
             url = f"https://www.googleapis.com/youtube/v3/search?part=snippet&channelId={user['yt_channel']}&eventType=live&type=video"
-            resp = requests.get(url, headers=headers)
-            if resp.status_code != 200:
-                print(f"YT Live search failed for user {user_id}: {resp.text}")
-                return
-            data = resp.json()
+            async with session.get(url, headers=headers) as resp:
+                if resp.status != 200:
+                    print(f"YT Live search failed for user {user_id}: {await resp.text()}")
+                    return
+                data = await resp.json()
+
             items = data.get("items", [])
             if not items:
-                # No live video, skip
                 return
+
             live_video_id = items[0]["id"]["videoId"]
 
-            # Get liveChatId from live broadcast details
             details_url = f"https://www.googleapis.com/youtube/v3/videos?part=liveStreamingDetails&id={live_video_id}"
-            details_resp = requests.get(details_url, headers=headers)
-            if details_resp.status_code != 200:
-                print(f"YT Live details failed for user {user_id}: {details_resp.text}")
-                return
-            details_data = details_resp.json()
+            async with session.get(details_url, headers=headers) as details_resp:
+                if details_resp.status != 200:
+                    print(f"YT Live details failed for user {user_id}: {await details_resp.text()}")
+                    return
+                details_data = await details_resp.json()
+
             live_chat_id = details_data["items"][0]["liveStreamingDetails"].get("activeLiveChatId")
             if not live_chat_id:
-                # No active chat
                 return
 
-            # Poll live chat messages
             chat_url = f"https://www.googleapis.com/youtube/v3/liveChat/messages?liveChatId={live_chat_id}&part=snippet,authorDetails"
-            # Save nextPageToken to paginate if needed (not implemented here)
-            chat_resp = requests.get(chat_url, headers=headers)
-            if chat_resp.status_code != 200:
-                print(f"YT Live chat messages failed for user {user_id}: {chat_resp.text}")
-                return
-            chat_data = chat_resp.json()
+            async with session.get(chat_url, headers=headers) as chat_resp:
+                if chat_resp.status != 200:
+                    print(f"YT Live chat messages failed for user {user_id}: {await chat_resp.text()}")
+                    return
+                chat_data = await chat_resp.json()
+
             messages = chat_data.get("items", [])
 
             if user_id not in self.last_message_ids:
@@ -311,12 +313,12 @@ class YouTubeLiveChatPoller:
             for message in messages:
                 msg_id = message["id"]
                 if msg_id in self.last_message_ids[user_id]:
-                    continue  # already processed
+                    continue
                 self.last_message_ids[user_id].add(msg_id)
+
                 text = message["snippet"]["displayMessage"]
                 author = message["authorDetails"]["displayName"]
 
-                # Forward to Twitch chat in the linked Twitch channel
                 twitch_username = user.get("twitch_username")
                 if twitch_username and twitch_username.lower() in self.bot.connected_channels:
                     channel = self.bot.connected_channels[twitch_username.lower()]
@@ -339,22 +341,22 @@ class TwitchBot(commands.Bot):
             client_secret=TWITCH_CLIENT_SECRET,
             bot_id=TWITCH_BOT_ID,
         )
-        self.loop.create_task(self.join_linked_channels())
         self.youtube_poller = YouTubeLiveChatPoller(self)
-        self.loop.create_task(self.youtube_poller.start())
-
-    async def join_linked_channels(self):
-        await self.wait_until_ready()
-        twitch_users = set()
-        for u in users.values():
-            if "twitch_username" in u:
-                twitch_users.add(u["twitch_username"].lower())
-        for channel in twitch_users:
-            print(f"Joining Twitch channel: {channel}")
-            await self.join_channels([channel])
 
     async def event_ready(self):
         print(f"Bot ready: {self.nick}")
+        # Start joining channels and polling after ready
+        asyncio.create_task(self.join_linked_channels())
+        asyncio.create_task(self.youtube_poller.start())
+
+    async def join_linked_channels(self):
+        twitch_users = {u["twitch_username"].lower() for u in users.values() if "twitch_username" in u}
+        for channel in twitch_users:
+            print(f"Joining Twitch channel: {channel}")
+            try:
+                await self.join_channels([channel])
+            except Exception as e:
+                print(f"Failed to join channel {channel}: {e}")
 
     async def event_message(self, message):
         if message.echo:
@@ -384,9 +386,9 @@ def run_flask():
     app.run(host="0.0.0.0", port=10000)
 
 def run_bot():
+    bot = TwitchBot()
     asyncio.run(bot.start())
 
 if __name__ == "__main__":
-    bot = TwitchBot()
-    threading.Thread(target=run_flask).start()
+    threading.Thread(target=run_flask, daemon=True).start()
     run_bot()
