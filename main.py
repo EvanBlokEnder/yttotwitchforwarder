@@ -197,6 +197,7 @@ def set_forward():
 def refresh_youtube_token(user_id):
     user = get_user(user_id)
     if not user or "yt_refresh" not in user:
+        print(f"No YouTube refresh token for user {user_id}")
         return False
 
     token_url = "https://oauth2.googleapis.com/token"
@@ -217,11 +218,13 @@ def refresh_youtube_token(user_id):
         "yt_token": access_token,
         "yt_token_expiry": time.time() + expires_in
     })
+    print(f"Refreshed YouTube token for user {user_id}")
     return True
 
 def refresh_twitch_token(user_id):
     user = get_user(user_id)
     if not user or "twitch_refresh" not in user:
+        print(f"No Twitch refresh token for user {user_id}")
         return False
 
     token_url = (
@@ -246,6 +249,7 @@ def refresh_twitch_token(user_id):
         "twitch_refresh": refresh_token,
         "twitch_token_expiry": time.time() + expires_in,
     })
+    print(f"Refreshed Twitch token for user {user_id}")
     return True
 
 # === YOUTUBE LIVE CHAT POLLING + FORWARDING ===
@@ -265,14 +269,18 @@ class YouTubeLiveChatPoller:
     async def poll_all_users(self, session):
         for user_id, user in list(users.items()):
             if "yt_token" not in user or "yt_channel" not in user or "forward_direction" not in user:
+                print(f"Skipping user {user_id}: Missing YouTube token, channel, or forward direction")
                 continue
             if user["forward_direction"] != "yt_to_twitch":
+                print(f"Skipping user {user_id}: Forward direction is {user['forward_direction']}")
                 continue
 
             expiry = user.get("yt_token_expiry", 0)
             if time.time() > expiry - 60:
                 print(f"Refreshing YouTube token for user {user_id}")
-                refresh_youtube_token(user_id)
+                if not refresh_youtube_token(user_id):
+                    print(f"Failed to refresh YouTube token for user {user_id}, skipping")
+                    continue
                 user = get_user(user_id)
 
             await self.poll_live_chat(user_id, user, session)
@@ -290,9 +298,11 @@ class YouTubeLiveChatPoller:
 
             items = data.get("items", [])
             if not items:
+                print(f"No live stream found for user {user_id}")
                 return
 
             live_video_id = items[0]["id"]["videoId"]
+            print(f"Found live stream {live_video_id} for user {user_id}")
 
             details_url = f"https://www.googleapis.com/youtube/v3/videos?part=liveStreamingDetails&id={live_video_id}"
             async with session.get(details_url, headers=headers) as details_resp:
@@ -303,6 +313,7 @@ class YouTubeLiveChatPoller:
 
             live_chat_id = details_data["items"][0]["liveStreamingDetails"].get("activeLiveChatId")
             if not live_chat_id:
+                print(f"No active live chat for video {live_video_id} for user {user_id}")
                 return
 
             chat_url = f"https://www.googleapis.com/youtube/v3/liveChat/messages?liveChatId={live_chat_id}&part=snippet,authorDetails"
@@ -313,6 +324,7 @@ class YouTubeLiveChatPoller:
                 chat_data = await chat_resp.json()
 
             messages = chat_data.get("items", [])
+            print(f"Found {len(messages)} messages for user {user_id}")
 
             if user_id not in self.last_message_ids:
                 self.last_message_ids[user_id] = set()
@@ -332,6 +344,8 @@ class YouTubeLiveChatPoller:
                     send_text = f"[YT] {author}: {text}"
                     print(f"Forwarding YT->Twitch for user {user_id}: {send_text}")
                     await channel.send(send_text)
+                else:
+                    print(f"Cannot forward YT->Twitch for user {user_id}: Twitch channel {twitch_username} not connected")
 
         except Exception as e:
             print(f"Error polling YouTube live chat for user {user_id}: {e}")
@@ -359,11 +373,20 @@ class TwitchBot(commands.Bot):
     async def join_linked_channels(self):
         twitch_users = {u["twitch_username"].lower() for u in users.values() if "twitch_username" in u}
         for channel in twitch_users:
-            print(f"Joining Twitch channel: {channel}")
-            try:
-                await self.join_channels([channel])
-            except Exception as e:
-                print(f"Failed to join channel {channel}: {e}")
+            print(f"Attempting to join Twitch channel: {channel}")
+            retry_count = 0
+            max_retries = 3
+            while retry_count < max_retries:
+                try:
+                    await self.join_channels([channel])
+                    print(f"Successfully joined Twitch channel: {channel}")
+                    break
+                except Exception as e:
+                    retry_count += 1
+                    print(f"Failed to join channel {channel} (attempt {retry_count}/{max_retries}): {e}")
+                    if retry_count == max_retries:
+                        print(f"Giving up on joining channel {channel}")
+                    await asyncio.sleep(5)
 
     async def event_message(self, message):
         if message.echo:
@@ -372,9 +395,11 @@ class TwitchBot(commands.Bot):
         await self.handle_commands(message)
 
         user = message.author.name.lower()
+        matched_user_id = None
         matched_user = None
-        for u in users.values():
+        for uid, u in users.items():
             if u.get("twitch_username", "").lower() == user:
+                matched_user_id = uid
                 matched_user = u
                 break
 
@@ -384,8 +409,74 @@ class TwitchBot(commands.Bot):
             if cmd and message.content.startswith(cmd):
                 payload = message.content[len(cmd):].strip()
                 if direction == "twitch_to_yt":
-                    # TODO: Implement sending message to YouTube live chat here
-                    await message.channel.send(f"[Forwarded to YouTube] {payload}")
+                    print(f"Processing Twitch->YT for user {matched_user_id}: {payload}")
+                    # Check and refresh YouTube token if needed
+                    expiry = matched_user.get("yt_token_expiry", 0)
+                    if time.time() > expiry - 60:
+                        print(f"Refreshing YouTube token for user {matched_user_id}")
+                        if not refresh_youtube_token(matched_user_id):
+                            print(f"Failed to refresh YouTube token for user {matched_user_id}")
+                            await message.channel.send("Failed to forward to YouTube: Token refresh failed")
+                            return
+                        matched_user = get_user(matched_user_id)
+
+                    # Find active YouTube live chat
+                    try:
+                        async with ClientSession() as session:
+                            headers = {"Authorization": f"Bearer {matched_user['yt_token']}"}
+                            url = f"https://www.googleapis.com/youtube/v3/search?part=snippet&channelId={matched_user['yt_channel']}&eventType=live&type=video"
+                            async with session.get(url, headers=headers) as resp:
+                                if resp.status != 200:
+                                    print(f"YT Live search failed for user {matched_user_id}: {await resp.text()}")
+                                    await message.channel.send("Failed to forward to YouTube: No live stream found")
+                                    return
+                                data = await resp.json()
+
+                            items = data.get("items", [])
+                            if not items:
+                                print(f"No live stream found for user {matched_user_id}")
+                                await message.channel.send("Failed to forward to YouTube: No live stream found")
+                                return
+
+                            live_video_id = items[0]["id"]["videoId"]
+                            details_url = f"https://www.googleapis.com/youtube/v3/videos?part=liveStreamingDetails&id={live_video_id}"
+                            async with session.get(details_url, headers=headers) as details_resp:
+                                if details_resp.status != 200:
+                                    print(f"YT Live details failed for user {matched_user_id}: {await details_resp.text()}")
+                                    await message.channel.send("Failed to forward to YouTube: Could not get live stream details")
+                                    return
+                                details_data = await details_resp.json()
+
+                            live_chat_id = details_data["items"][0]["liveStreamingDetails"].get("activeLiveChatId")
+                            if not live_chat_id:
+                                print(f"No active live chat for video {live_video_id} for user {matched_user_id}")
+                                await message.channel.send("Failed to forward to YouTube: No active live chat")
+                                return
+
+                            # Send message to YouTube live chat
+                            chat_url = f"https://www.googleapis.com/youtube/v3/liveChat/messages?part=snippet"
+                            payload = {
+                                "snippet": {
+                                    "liveChatId": live_chat_id,
+                                    "type": "textMessageEvent",
+                                    "textMessageDetails": {
+                                        "messageText": f"[Twitch] {user}: {payload}"
+                                    }
+                                }
+                            }
+                            async with session.post(chat_url, headers=headers, json=payload) as chat_resp:
+                                if chat_resp.status != 200:
+                                    print(f"Failed to send message to YouTube for user {matched_user_id}: {await chat_resp.text()}")
+                                    await message.channel.send("Failed to forward to YouTube: Could not send message")
+                                    return
+                                print(f"Forwarded Twitch->YT for user {matched_user_id}: {payload}")
+                                await message.channel.send(f"[Forwarded to YouTube] {payload}")
+
+                    except Exception as e:
+                        print(f"Error forwarding Twitch->YT for user {matched_user_id}: {e}")
+                        await message.channel.send("Failed to forward to YouTube: Internal error")
+                else:
+                    print(f"Twitch message from {user} not forwarded: Direction is {direction}")
 
 # === RUN SERVER + BOT ===
 
@@ -394,7 +485,11 @@ def run_flask():
 
 def run_bot():
     bot = TwitchBot()
-    asyncio.run(bot.start())
+    loop = asyncio.get_event_loop()
+    try:
+        loop.run_until_complete(bot.start())
+    finally:
+        loop.close()
 
 if __name__ == "__main__":
     threading.Thread(target=run_flask, daemon=True).start()
