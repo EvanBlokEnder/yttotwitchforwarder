@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+env/
+venv/
+
+# Flask & bot runtime
+*.db
+*.sqlite3
+instance/
+.env
+
+# VS Code / IDE
+.vscode/
+*.code-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Render log
+*.log
+logs/
+
+# Python virtual environments
+.venv/
+
+# Secrets (DO NOT COMMIT)
+secrets.json
+tokens.json
+users.json
