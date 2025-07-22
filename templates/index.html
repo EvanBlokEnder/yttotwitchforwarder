@@ -1,6 +1,8 @@
 <!DOCTYPE html>
 <html>
-<head><title>Link Accounts & Setup Forwarding</title></head>
+<head>
+  <title>Link Accounts & Set Forwarding</title>
+</head>
 <body>
   <h1>Link Your Accounts</h1>
   <a href="/auth/youtube" target="_blank">Login with YouTube</a><br>
@@ -8,15 +10,15 @@
 
   <h2>Set Forwarding Command</h2>
   <form method="POST" action="/set_forward">
-    <label>User ID (from link step):</label><br>
-    <input name="user_id" required><br>
     <label>Command (e.g. !bsr):</label><br>
     <input name="command" required><br>
+
     <label>Direction:</label><br>
     <select name="direction" required>
       <option value="yt_to_twitch">YouTube → Twitch</option>
       <option value="twitch_to_yt">Twitch → YouTube</option>
     </select><br><br>
+
     <button type="submit">Save Forward</button>
   </form>
 </body>
