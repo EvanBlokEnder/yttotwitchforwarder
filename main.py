@@ -75,10 +75,7 @@ def index():
 
 @app.route("/auth/youtube")
 def auth_youtube():
-    user_id.MobileNav__listItem--item--selected {
-    background-color: var(--bg-color-dark);
-    color: var(--text-color-dark);
-}
+    user_id = get_current_user_id()
     state = f"yt:{user_id}"
     scope = "https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/youtube.force-ssl https://www.googleapis.com/auth/youtube"
     url = (
