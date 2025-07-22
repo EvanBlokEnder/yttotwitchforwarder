@@ -75,9 +75,12 @@ def index():
 
 @app.route("/auth/youtube")
 def auth_youtube():
-    user_id = get_current_user_id()
-    state = f"yt:{user_id}"  # <-- FIX: prefix user_id with 'yt:'
-    scope = "https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/youtube.force-ssl"
+    user_id.MobileNav__listItem--item--selected {
+    background-color: var(--bg-color-dark);
+    color: var(--text-color-dark);
+}
+    state = f"yt:{user_id}"
+    scope = "https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/youtube.force-ssl https://www.googleapis.com/auth/youtube"
     url = (
         "https://accounts.google.com/o/oauth2/v2/auth?"
         f"client_id={YT_CLIENT_ID}&redirect_uri={REDIRECT_URI}&response_type=code&"
@@ -88,7 +91,7 @@ def auth_youtube():
 @app.route("/auth/twitch")
 def auth_twitch():
     user_id = get_current_user_id()
-    state = f"twitch:{user_id}"  # <-- FIX: prefix user_id with 'twitch:'
+    state = f"twitch:{user_id}"
     scopes = "chat:read chat:edit"
     url = (
         "https://id.twitch.tv/oauth2/authorize?"
@@ -104,17 +107,16 @@ def callback():
     error = request.args.get("error")
 
     if error:
+        print(f"Auth error: {error}")
         return f"Error: {error}"
 
     if not code or not state:
+        print("Missing code or state in callback")
         return "Missing code or state", 400
 
-    # --- FIX: parse state prefix ---
     if state.startswith("twitch:"):
         user_id = state[len("twitch:"):]
-        token_url = (
-            "https://id.twitch.tv/oauth2/token"
-        )
+        token_url = "https://id.twitch.tv/oauth2/token"
         payload = {
             "client_id": TWITCH_CLIENT_ID,
             "client_secret": TWITCH_CLIENT_SECRET,
@@ -124,6 +126,7 @@ def callback():
         }
         resp = requests.post(token_url, data=payload)
         if resp.status_code != 200:
+            print(f"Failed to get Twitch token: {resp.text}")
             return f"Failed to get Twitch token: {resp.text}", 500
         data = resp.json()
         access_token = data.get("access_token")
@@ -131,6 +134,7 @@ def callback():
         headers = {"Authorization": f"Bearer {access_token}", "Client-Id": TWITCH_CLIENT_ID}
         user_resp = requests.get("https://api.twitch.tv/helix/users", headers=headers)
         if user_resp.status_code != 200:
+            print(f"Failed to get Twitch user info: {user_resp.text}")
             return f"Failed to get Twitch user info: {user_resp.text}", 500
         user_data = user_resp.json()
         username = user_data["data"][0]["login"]
@@ -153,6 +157,7 @@ def callback():
         }
         resp = requests.post(token_url, data=payload)
         if resp.status_code != 200:
+            print(f"Failed to get YouTube token: {resp.text}")
             return f"Failed to get YouTube token: {resp.text}", 500
         data = resp.json()
         access_token = data.get("access_token")
@@ -161,6 +166,7 @@ def callback():
         headers = {"Authorization": f"Bearer {access_token}"}
         yt_resp = requests.get("https://www.googleapis.com/youtube/v3/channels?part=id&mine=true", headers=headers)
         if yt_resp.status_code != 200:
+            print(f"Failed to get YouTube channel info: {yt_resp.text}")
             return f"Failed to get YouTube channel info: {yt_resp.text}", 500
         yt_data = yt_resp.json()
         channel_id = yt_data["items"][0]["id"]
@@ -172,6 +178,7 @@ def callback():
         })
 
     else:
+        print("Invalid state format in callback")
         return "Invalid state format", 400
 
     resp = make_response(redirect("/"))
@@ -184,12 +191,14 @@ def set_forward():
     command = request.form.get("command", "").strip()
     direction = request.form.get("direction", "").strip()
     if not command or direction not in ("yt_to_twitch", "twitch_to_yt"):
+        print(f"Invalid input for set_forward: command={command}, direction={direction}")
         return "Invalid input", 400
 
     update_user(user_id, {
         "forward_command": command,
         "forward_direction": direction
     })
+    print(f"Set forward for user {user_id}: command={command}, direction={direction}")
     return redirect("/")
 
 # === TOKEN REFRESH LOGIC ===
@@ -227,9 +236,7 @@ def refresh_twitch_token(user_id):
         print(f"No Twitch refresh token for user {user_id}")
         return False
 
-    token_url = (
-        "https://id.twitch.tv/oauth2/token"
-    )
+    token_url = "https://id.twitch.tv/oauth2/token"
     payload = {
         "grant_type": "refresh_token",
         "refresh_token": user["twitch_refresh"],
@@ -344,6 +351,7 @@ class YouTubeLiveChatPoller:
                     send_text = f"[YT] {author}: {text}"
                     print(f"Forwarding YT->Twitch for user {user_id}: {send_text}")
                     await channel.send(send_text)
+                    await channel.send(f"!@{twitch_username} response from YouTube {text}")
                 else:
                     print(f"Cannot forward YT->Twitch for user {user_id}: Twitch channel {twitch_username} not connected")
 
@@ -354,6 +362,8 @@ class YouTubeLiveChatPoller:
 
 class TwitchBot(commands.Bot):
     def __init__(self):
+        if not TWITCH_BOT_TOKEN:
+            raise ValueError("TWITCH_BOT_TOKEN is not set")
         super().__init__(
             token=TWITCH_BOT_TOKEN,
             prefix="!",
@@ -366,7 +376,7 @@ class TwitchBot(commands.Bot):
 
     async def event_ready(self):
         print(f"Bot ready: {self.nick}")
-        # Start joining channels and polling after ready
+        print(f"Connected channels: {list(self.connected_channels.keys())}")
         asyncio.create_task(self.join_linked_channels())
         asyncio.create_task(self.youtube_poller.start())
 
@@ -406,21 +416,21 @@ class TwitchBot(commands.Bot):
         if matched_user:
             cmd = matched_user.get("forward_command")
             direction = matched_user.get("forward_direction")
+            print(f"Processing message from {user}: command={cmd}, direction={direction}")
             if cmd and message.content.startswith(cmd):
                 payload = message.content[len(cmd):].strip()
                 if direction == "twitch_to_yt":
                     print(f"Processing Twitch->YT for user {matched_user_id}: {payload}")
-                    # Check and refresh YouTube token if needed
+                    await message.channel.send(f"!@{user} the message will be sent to YouTube")
                     expiry = matched_user.get("yt_token_expiry", 0)
                     if time.time() > expiry - 60:
                         print(f"Refreshing YouTube token for user {matched_user_id}")
                         if not refresh_youtube_token(matched_user_id):
                             print(f"Failed to refresh YouTube token for user {matched_user_id}")
-                            await message.channel.send("Failed to forward to YouTube: Token refresh failed")
+                            await message.channel.send(f"!@{user} Failed to forward to YouTube: Token refresh failed")
                             return
                         matched_user = get_user(matched_user_id)
 
-                    # Find active YouTube live chat
                     try:
                         async with ClientSession() as session:
                             headers = {"Authorization": f"Bearer {matched_user['yt_token']}"}
@@ -428,14 +438,14 @@ class TwitchBot(commands.Bot):
                             async with session.get(url, headers=headers) as resp:
                                 if resp.status != 200:
                                     print(f"YT Live search failed for user {matched_user_id}: {await resp.text()}")
-                                    await message.channel.send("Failed to forward to YouTube: No live stream found")
+                                    await message.channel.send(f"!@{user} Failed to forward to YouTube: No live stream found")
                                     return
                                 data = await resp.json()
 
                             items = data.get("items", [])
                             if not items:
                                 print(f"No live stream found for user {matched_user_id}")
-                                await message.channel.send("Failed to forward to YouTube: No live stream found")
+                                await message.channel.send(f"!@{user} Failed to forward to YouTube: No live stream found")
                                 return
 
                             live_video_id = items[0]["id"]["videoId"]
@@ -443,17 +453,16 @@ class TwitchBot(commands.Bot):
                             async with session.get(details_url, headers=headers) as details_resp:
                                 if details_resp.status != 200:
                                     print(f"YT Live details failed for user {matched_user_id}: {await details_resp.text()}")
-                                    await message.channel.send("Failed to forward to YouTube: Could not get live stream details")
+                                    await message.channel.send(f"!@{user} Failed to forward to YouTube: Could not get live stream details")
                                     return
                                 details_data = await details_resp.json()
 
                             live_chat_id = details_data["items"][0]["liveStreamingDetails"].get("activeLiveChatId")
                             if not live_chat_id:
                                 print(f"No active live chat for video {live_video_id} for user {matched_user_id}")
-                                await message.channel.send("Failed to forward to YouTube: No active live chat")
+                                await message.channel.send(f"!@{user} Failed to forward to YouTube: No active live chat")
                                 return
 
-                            # Send message to YouTube live chat
                             chat_url = f"https://www.googleapis.com/youtube/v3/liveChat/messages?part=snippet"
                             payload = {
                                 "snippet": {
@@ -467,14 +476,16 @@ class TwitchBot(commands.Bot):
                             async with session.post(chat_url, headers=headers, json=payload) as chat_resp:
                                 if chat_resp.status != 200:
                                     print(f"Failed to send message to YouTube for user {matched_user_id}: {await chat_resp.text()}")
-                                    await message.channel.send("Failed to forward to YouTube: Could not send message")
+                                    await message.channel.send(f"!@{user} Failed to forward to YouTube: Could not send message")
                                     return
-                                print(f"Forwarded Twitch->YT for user {matched_user_id}: {payload}")
-                                await message.channel.send(f"[Forwarded to YouTube] {payload}")
+                                chat_data = await chat_resp.json()
+                                sent_message = chat_data["snippet"]["displayMessage"]
+                                print(f"Forwarded Twitch->YT for user {matched_user_id}: {sent_message}")
+                                await message.channel.send(f"!@{user} response from YouTube {sent_message}")
 
                     except Exception as e:
                         print(f"Error forwarding Twitch->YT for user {matched_user_id}: {e}")
-                        await message.channel.send("Failed to forward to YouTube: Internal error")
+                        await message.channel.send(f"!@{user} Failed to forward to YouTube: Internal error")
                 else:
                     print(f"Twitch message from {user} not forwarded: Direction is {direction}")
 
@@ -484,10 +495,16 @@ def run_flask():
     app.run(host="0.0.0.0", port=10000)
 
 def run_bot():
+    if not all([TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET, TWITCH_BOT_TOKEN, TWITCH_BOT_ID, YT_CLIENT_ID, YT_CLIENT_SECRET]):
+        print("Missing required environment variables")
+        return
     bot = TwitchBot()
-    loop = asyncio.get_event_loop()
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(bot.start())
+    except Exception as e:
+        print(f"Bot failed to start: {e}")
     finally:
         loop.close()
 
