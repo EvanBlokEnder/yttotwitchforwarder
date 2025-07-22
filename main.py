@@ -325,7 +325,7 @@ class YouTubeLiveChatPoller:
                 if chat_resp.status != 200:
                     print(f"YT Live chat messages failed for user {user_id}: {await chat_resp.text()}")
                     return
-                chat_data = await chat_resp.json()
+                chat_data = await resp.json()
 
             messages = chat_data.get("items", [])
             print(f"Found {len(messages)} messages for user {user_id}")
@@ -492,8 +492,20 @@ def run_flask():
     app.run(host="0.0.0.0", port=10000)
 
 def run_bot():
-    if not all([TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET, TWITCH_BOT_TOKEN, TWITCH_BOT_ID, YT_CLIENT_ID, YT_CLIENT_SECRET]):
-        print("Missing required environment variables")
+    missing_vars = []
+    env_vars = {
+        "TWITCH_CLIENT_ID": TWITCH_CLIENT_ID,
+        "TWITCH_CLIENT_SECRET": TWITCH_CLIENT_SECRET,
+        "TWITCH_BOT_TOKEN": TWITCH_BOT_TOKEN,
+        "TWITCH_BOT_ID": TWITCH_BOT_ID,
+        "YT_CLIENT_ID": YT_CLIENT_ID,
+        "YT_CLIENT_SECRET": YT_CLIENT_SECRET
+    }
+    for var_name, var_value in env_vars.items():
+        if not var_value:
+            missing_vars.append(var_name)
+    if missing_vars:
+        print(f"Missing required environment variables: {', '.join(missing_vars)}")
         return
     bot = TwitchBot()
     loop = asyncio.new_event_loop()
