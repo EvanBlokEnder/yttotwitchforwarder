@@ -76,7 +76,7 @@ def index():
 @app.route("/auth/youtube")
 def auth_youtube():
     user_id = get_current_user_id()
-    state = user_id
+    state = f"yt:{user_id}"  # <-- FIX: prefix user_id with 'yt:'
     scope = "https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/youtube.force-ssl"
     url = (
         "https://accounts.google.com/o/oauth2/v2/auth?"
@@ -88,7 +88,7 @@ def auth_youtube():
 @app.route("/auth/twitch")
 def auth_twitch():
     user_id = get_current_user_id()
-    state = user_id
+    state = f"twitch:{user_id}"  # <-- FIX: prefix user_id with 'twitch:'
     scopes = "chat:read chat:edit"
     url = (
         "https://id.twitch.tv/oauth2/authorize?"
@@ -109,7 +109,9 @@ def callback():
     if not code or not state:
         return "Missing code or state", 400
 
-    if "scope" in request.args:  # Twitch callback
+    # --- FIX: parse state prefix ---
+    if state.startswith("twitch:"):
+        user_id = state[len("twitch:"):]
         token_url = (
             "https://id.twitch.tv/oauth2/token"
         )
@@ -132,14 +134,15 @@ def callback():
             return f"Failed to get Twitch user info: {user_resp.text}", 500
         user_data = user_resp.json()
         username = user_data["data"][0]["login"]
-        update_user(state, {
+        update_user(user_id, {
             "twitch_token": access_token,
             "twitch_refresh": refresh_token,
             "twitch_username": username,
             "twitch_token_expiry": time.time() + data.get("expires_in", 0),
         })
 
-    else:  # YouTube callback
+    elif state.startswith("yt:"):
+        user_id = state[len("yt:"):]
         token_url = "https://oauth2.googleapis.com/token"
         payload = {
             "code": code,
@@ -161,15 +164,18 @@ def callback():
             return f"Failed to get YouTube channel info: {yt_resp.text}", 500
         yt_data = yt_resp.json()
         channel_id = yt_data["items"][0]["id"]
-        update_user(state, {
+        update_user(user_id, {
             "yt_token": access_token,
             "yt_refresh": refresh_token,
             "yt_channel": channel_id,
             "yt_token_expiry": time.time() + expires_in
         })
 
+    else:
+        return "Invalid state format", 400
+
     resp = make_response(redirect("/"))
-    resp.set_cookie("user_id", state, max_age=60*60*24*365)
+    resp.set_cookie("user_id", user_id, max_age=60*60*24*365)
     return resp
 
 @app.route("/set_forward", methods=["POST"])
