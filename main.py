@@ -4,6 +4,7 @@ import uuid
 import time
 import asyncio
 import threading
+import requests
 from aiohttp import ClientSession
 from flask import Flask, request, redirect, render_template, make_response
 from twitchio.ext import commands
